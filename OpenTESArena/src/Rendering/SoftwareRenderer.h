@@ -95,6 +95,9 @@ private:
 		Camera(const Double3 &eye, const Double3 &direction, double fovY, double aspect,
 			double projectionModifier);
 
+		// Gets the angle of the camera's 2D forward vector. 0 is +Z, pi/2 is +X.
+		double getXZAngleRadians() const;
+
 		// Gets the camera's Y voxel coordinate after compensating for ceiling height.
 		int getAdjustedEyeVoxelY(double ceilingHeight) const;
 	};
@@ -253,18 +256,29 @@ private:
 	// A distant object that has been projected on-screen and is at least partially visible.
 	struct VisDistantObject
 	{
+		struct ParallaxData
+		{
+			// Visible angles (in radians) are the object's angle range clamped within the camera's
+			// angle range.
+			double xVisAngleStart, xVisAngleEnd;
+			double uStart, uEnd;
+
+			ParallaxData();
+			ParallaxData(double xVisAngleStart, double xVisAngleEnd, double uStart, double uEnd);
+		};
+
 		const SkyTexture *texture;
 		DrawRange drawRange;
-		double xAngleStart, xAngleEnd; // For parallax texture coordinates.
+		ParallaxData parallax;
 		double xProjStart, xProjEnd; // Projected screen coordinates.
 		int xStart, xEnd; // Pixel coordinates.
 		bool emissive; // Only animated lands (i.e., volcanoes) are emissive.
 
-		VisDistantObject(const SkyTexture &texture, DrawRange &&drawRange, double xAngleStart,
-			double xAngleEnd, double xProjStart, double xProjEnd, int xStart, int xEnd,
-			bool emissive);
+		// Parallax constructor.
+		VisDistantObject(const SkyTexture &texture, DrawRange &&drawRange, ParallaxData &&parallax,
+			double xProjStart, double xProjEnd, int xStart, int xEnd, bool emissive);
 
-		// Constructor for non-parallax visible distant object.
+		// Non-parallax constructor.
 		VisDistantObject(const SkyTexture &texture, DrawRange &&drawRange, double xProjStart,
 			double xProjEnd, int xStart, int xEnd, bool emissive);
 	};
@@ -377,9 +391,6 @@ private:
 	// Gets the number of render threads to use based on the given mode.
 	static int getRenderThreadsFromMode(int mode);
 
-	// A variant of atan2() with a range of [0, 2pi] instead of [-pi, pi].
-	static double fullAtan2(double y, double x);
-
 	// Initializes render threads that run in the background for the duration of the renderer's
 	// lifetime. This can also be used to reset threads after a screen resize.
 	void initRenderThreads(int width, int height, int threadCount);
@@ -389,8 +400,8 @@ private:
 	void resetRenderThreads();
 
 	// Refreshes the list of distant objects to be drawn.
-	void updateVisibleDistantObjects(bool parallaxSky, const Camera &camera,
-		const FrameView &frame);
+	void updateVisibleDistantObjects(bool parallaxSky, const Double3 &sunDirection,
+		const Camera &camera, const FrameView &frame);
 
 	// Refreshes the list of flats to be drawn.
 	void updateVisibleFlats(const Camera &camera);

@@ -1,12 +1,16 @@
+#include <array>
 #include <cassert>
+#include <type_traits>
 
 #include "ClimateType.h"
 #include "DistantSky.h"
 #include "Location.h"
 #include "WeatherType.h"
 #include "../Assets/CityDataFile.h"
+#include "../Assets/ExeData.h"
 #include "../Assets/MiscAssets.h"
 #include "../Math/Constants.h"
+#include "../Math/MathUtils.h"
 #include "../Math/Random.h"
 #include "../Media/TextureManager.h"
 #include "../Rendering/Surface.h"
@@ -141,6 +145,8 @@ const Double3 &DistantSky::SpaceObject::getDirection() const
 	return this->direction;
 }
 
+const int DistantSky::UNIQUE_ANGLES = 512;
+
 DistantSky::DistantSky()
 {
 	this->sunSurface = nullptr;
@@ -198,6 +204,9 @@ void DistantSky::init(int localCityID, int provinceID, WeatherType weatherType,
 	const ClimateType climateType = Location::getCityClimateType(
 		localCityID, provinceID, miscAssets);
 
+	const auto &exeData = miscAssets.getExeData();
+	const auto &distantMountainFilenames = exeData.locations.distantMountainFilenames;
+
 	std::string baseFilename;
 	int pos;
 	int var;
@@ -206,21 +215,21 @@ void DistantSky::init(int localCityID, int provinceID, WeatherType weatherType,
 	// Decide the base image filename, etc. based on which climate the city is in.
 	if (climateType == ClimateType::Temperate)
 	{
-		baseFilename = "temp00.img";
+		baseFilename = distantMountainFilenames.at(2);
 		pos = 4;
 		var = 10;
 		maxDigits = 2;
 	}
 	else if (climateType == ClimateType::Desert)
 	{
-		baseFilename = "desert0.img";
+		baseFilename = distantMountainFilenames.at(1);
 		pos = 6;
 		var = 4;
 		maxDigits = 1;
 	}
 	else if (climateType == ClimateType::Mountain)
 	{
-		baseFilename = "mount000.img";
+		baseFilename = distantMountainFilenames.at(0);
 		pos = 6;
 		var = 11;
 		maxDigits = 2;
@@ -232,12 +241,23 @@ void DistantSky::init(int localCityID, int provinceID, WeatherType weatherType,
 	}
 
 	const auto &cityDataFile = miscAssets.getCityDataFile();
-	const uint32_t citySeed = cityDataFile.getCitySeed(localCityID, provinceID);
-	ArenaRandom random(citySeed);
+	const uint32_t skySeed = cityDataFile.getDistantSkySeed(localCityID, provinceID);
+	ArenaRandom random(skySeed);
 	const int count = (random.next() % 4) + 2;
 
+	// Converts an Arena angle to an actual angle in radians.
+	auto arenaAngleToRadians = [](int angle)
+	{
+		// Arena angles: 0 = south, 128 = west, 256 = north, 384 = east.
+		// Change from clockwise to counter-clockwise and move 0 to east.
+		const double arenaRadians = Constants::TwoPi *
+			(static_cast<double>(angle) / static_cast<double>(DistantSky::UNIQUE_ANGLES));
+		const double flippedArenaRadians = Constants::TwoPi - arenaRadians;
+		return flippedArenaRadians - Constants::HalfPi;
+	};
+
 	// Lambda for creating images with certain sky parameters.
-	auto placeStaticObjects = [this, &textureManager, &random](int count,
+	auto placeStaticObjects = [this, &textureManager, &random, &arenaAngleToRadians](int count,
 		const std::string &baseFilename, int pos, int var, int maxDigits, bool randomHeight)
 	{
 		for (int i = 0; i < count; i++)
@@ -276,10 +296,8 @@ void DistantSky::init(int localCityID, int provinceID, WeatherType weatherType,
 			const int yPos = randomHeight ? (random.next() % yPosLimit) : 0;
 
 			// Convert from Arena units to radians.
-			constexpr int arenaAngleLimit = 512;
-			const int arenaAngle = random.next() % arenaAngleLimit;
-			const double angleRadians = (Constants::Pi * 2.0) *
-				(static_cast<double>(arenaAngle) / static_cast<double>(arenaAngleLimit));
+			const int arenaAngle = random.next() % DistantSky::UNIQUE_ANGLES;
+			const double angleRadians = arenaAngleToRadians(arenaAngle);
 
 			// The object is either land or a cloud, currently determined by 'randomHeight' as
 			// a shortcut. Land objects have no height. I'm doing it this way because LandObject
@@ -301,26 +319,168 @@ void DistantSky::init(int localCityID, int provinceID, WeatherType weatherType,
 	// Initial set of statics based on the climate.
 	placeStaticObjects(count, baseFilename, pos, var, maxDigits, false);
 
-	// If the weather is clear, add clouds.
-	if (weatherType == WeatherType::Clear)
+	// Add clouds if the weather conditions are permitting.
+	const bool hasClouds = weatherType == WeatherType::Clear;
+	if (hasClouds)
 	{
 		const uint32_t cloudSeed = random.getSeed() + (currentDay % 32);
 		random.srand(cloudSeed);
 
 		const int cloudCount = 7;
+		const std::string &cloudFilename = exeData.locations.cloudFilename;
 		const int cloudPos = 5;
 		const int cloudVar = 17;
 		const int cloudMaxDigits = 2;
-		placeStaticObjects(cloudCount, "cloud00.img", cloudPos, cloudVar, cloudMaxDigits, true);
+		placeStaticObjects(cloudCount, cloudFilename, cloudPos, cloudVar, cloudMaxDigits, true);
 	}
 
-	// Other initializations (animated land, stars).
-	// @todo
+	// Initialize animated lands (if any).
+	const bool hasAnimLand = provinceID == 3;
+	if (hasAnimLand)
+	{
+		const uint32_t citySeed = cityDataFile.getCitySeed(localCityID, provinceID);
 
-	this->sunSurface = &textureManager.getSurface("SUN.IMG");
+		// Position of animated land on province map; determines where it is on the horizon
+		// for each location.
+		const Int2 animLandGlobalPos(132, 52);
+		const Int2 locationGlobalPos = cityDataFile.getLocalCityPoint(citySeed);
+
+		// Distance on province map from current location to the animated land.
+		const int dist = CityDataFile::getDistance(locationGlobalPos, animLandGlobalPos);
+
+		// Position of the animated land on the horizon.
+		const double angle = std::atan2(
+			static_cast<double>(locationGlobalPos.y - animLandGlobalPos.y),
+			static_cast<double>(animLandGlobalPos.x - locationGlobalPos.x));
+
+		// Use different animations based on the map distance.
+		const int animIndex = [dist]()
+		{
+			if (dist < 80)
+			{
+				return 0;
+			}
+			else if (dist < 150)
+			{
+				return 1;
+			}
+			else
+			{
+				return 2;
+			}
+		}();
+
+		const auto &animFilenames = exeData.locations.animDistantMountainFilenames;
+		const std::string animFilename = String::toUppercase(animFilenames.at(animIndex));
+
+		// .DFAs have multiple frames, .IMGs do not.
+		const bool hasMultipleFrames = animFilename.find(".DFA") != std::string::npos;
+
+		AnimatedLandObject animLandObj(angle);
+
+		// Determine which frames the animation will have.
+		if (hasMultipleFrames)
+		{
+			const auto &animSurfaces = textureManager.getSurfaces(animFilename);
+			for (auto &surface : animSurfaces)
+			{
+				animLandObj.addSurface(surface);
+			}
+		}
+		else
+		{
+			const auto &surface = textureManager.getSurface(animFilename);
+			animLandObj.addSurface(surface);
+		}
+
+		this->animLandObjects.push_back(std::move(animLandObj));
+	}
+
+	// Initialize stars.
+	struct SubStar
+	{
+		int16_t dx, dy;
+		uint8_t color;
+	};
+
+	struct Star
+	{
+		int16_t x, y, z;
+		std::vector<SubStar> subList;
+		int8_t type;
+	};
+
+	auto getRndCoord = [&random]()
+	{
+		const int16_t d = (0x800 + random.next()) & 0x0FFF;
+		return ((d & 2) == 0) ? d : -d;
+	};
+
+	std::vector<Star> stars;
+	std::array<bool, 3> planets = { false, false, false };
+
+	random.srand(0x12345679);
+
+	const int starCount = 40;
+	for (int i = 0; i < starCount; i++)
+	{
+		Star star;
+		star.x = getRndCoord();
+		star.y = getRndCoord();
+		star.z = getRndCoord();
+		star.type = -1;
+
+		const uint8_t selection = random.next() % 4;
+		if (selection != 0)
+		{
+			// Constellation.
+			std::vector<SubStar> starList;
+			const int n = 2 + (random.next() % 4);
+
+			for (int j = 0; j < n; j++)
+			{
+				// Must use arithmetic right shift, not logical right shift.
+				// C++ only does arithmetic right shift when the value is signed.
+				static_assert(std::is_signed<decltype(random.next())>::value, "Value not signed.");
+
+				SubStar subStar;
+				subStar.dx = random.next() >> 9;
+				subStar.dy = random.next() >> 9;
+				subStar.color = (random.next() % 10) + 64;
+				starList.push_back(std::move(subStar));
+			}
+
+			star.subList = std::move(starList);
+		}
+		else
+		{
+			// Large star.
+			int8_t value;
+			do
+			{
+				value = random.next() % 8;
+			} while ((value >= 5) && planets.at(value - 5));
+
+			if (value >= 5)
+			{
+				planets.at(value - 5) = true;
+			}
+
+			star.type = value;
+		}
+
+		stars.push_back(std::move(star));
+	}
+
+	// @todo: convert stars to modern representation.
+	// @todo: moons
+
+	// Initialize sun texture.
+	const std::string &sunFilename = exeData.locations.sunFilename;
+	this->sunSurface = &textureManager.getSurface(String::toUppercase(sunFilename));
 }
 
-void DistantSky::update(double dt)
+void DistantSky::tick(double dt)
 {
 	// Only animated distant land needs updating.
 	for (auto &anim : this->animLandObjects)

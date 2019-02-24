@@ -80,6 +80,7 @@ public:
 
 	std::string toString() const;
 	uint32_t toRGB() const;
+	double getYAngleRadians() const;
 	T lengthSquared() const;
 	T length() const;
 	Vector3f<T> normalized() const;
