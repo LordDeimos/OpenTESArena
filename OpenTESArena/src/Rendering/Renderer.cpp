@@ -2,7 +2,12 @@
 #include <cassert>
 #include <cmath>
 
+#ifdef HAVE_OPENGL
+#include "glbinding/binding.h"
+#include "glbinding/gl/gl.h"
+#endif
 #include "SDL.h"
+#include "SDL_opengl.h"
 
 #include "Renderer.h"
 #include "Surface.h"
@@ -294,17 +299,19 @@ void Renderer::init(int width, int height, bool fullscreen, int letterboxMode)
 
 	assert(width > 0);
 	assert(height > 0);
-
 	this->letterboxMode = letterboxMode;
-
+	bool opengl = this->opengl;
 	// Initialize window. The SDL_Surface is obtained from this window.
-	this->window = [width, height, fullscreen]()
+	this->window = [width, height, fullscreen, opengl]()
 	{
 		const std::string &title = Renderer::DEFAULT_TITLE;
 		const int position = fullscreen ? SDL_WINDOWPOS_UNDEFINED : SDL_WINDOWPOS_CENTERED;
 		const uint32_t flags = SDL_WINDOW_RESIZABLE |
-			(fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-
+			(fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) | (opengl ? SDL_WINDOW_OPENGL : 0);
+		if (opengl) {
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+		}
 		// If fullscreen is true, then width and height are ignored. They are stored
 		// behind the scenes for when the user changes to windowed mode, however.
 		return SDL_CreateWindow(title.c_str(), position, position, width, height, flags);
@@ -312,9 +319,14 @@ void Renderer::init(int width, int height, bool fullscreen, int letterboxMode)
 
 	DebugAssertMsg(this->window != nullptr, "SDL_CreateWindow");
 
+	if (opengl) {
+		this->context = SDL_GL_CreateContext(window);
+#ifdef HAVE_OPENGL
+		glbinding::Binding::initialize();
+#endif
+	}
 	// Initialize renderer context.
 	this->renderer = Renderer::createRenderer(this->window);
-
 	// Use window dimensions, just in case it's fullscreen and the given width and
 	// height are ignored.
 	Int2 windowDimensions = this->getWindowDimensions();
@@ -436,6 +448,9 @@ void Renderer::initializeWorldRendering(double resolutionScale, bool fullGameWin
 
 	// Initialize 3D rendering.
 	this->softwareRenderer.init(renderWidth, renderHeight, renderThreadsMode);
+#ifdef HAVE_OPENGL
+	this->hardwareRenderer.init(renderWidth, renderHeight);
+#endif
 }
 
 void Renderer::setRenderThreadsMode(int mode)
@@ -481,6 +496,9 @@ void Renderer::setVoxelTexture(int id, const uint32_t *srcTexels)
 {
 	assert(this->softwareRenderer.isInited());
 	this->softwareRenderer.setVoxelTexture(id, srcTexels);
+#ifdef HAVE_OPENGL
+	this->hardwareRenderer.setVoxelTexture(id, srcTexels);
+#endif
 }
 
 void Renderer::setFlatTexture(int id, const uint32_t *srcTexels, int width, int height)
@@ -610,7 +628,7 @@ void Renderer::fillOriginalRect(const Color &color, int x, int y, int w, int h)
 
 void Renderer::renderWorld(const Double3 &eye, const Double3 &forward, double fovY,
 	double ambient, double daytimePercent, bool parallaxSky, double ceilingHeight,
-	const std::vector<LevelData::DoorState> &openDoors, const VoxelGrid &voxelGrid)
+	const std::vector<LevelData::DoorState> &openDoors, const VoxelGrid &voxelGrid, bool hard)
 {
 	// The 3D renderer must be initialized.
 	assert(this->softwareRenderer.isInited());
@@ -626,9 +644,16 @@ void Renderer::renderWorld(const Double3 &eye, const Double3 &forward, double fo
 		std::string(SDL_GetError()));
 
 	// Render the game world to the game world frame buffer.
-	this->softwareRenderer.render(eye, forward, fovY, ambient, daytimePercent, parallaxSky,
-		ceilingHeight, openDoors, voxelGrid, gameWorldPixels);
-
+	switch (hard) {//Change render method
+	case true:
+#ifdef HAVE_OPENGL
+		this->hardwareRenderer.render(eye, forward, fovY, ceilingHeight, voxelGrid, gameWorldPixels);
+		break;
+#endif
+	case false:
+		this->softwareRenderer.render(eye, forward, fovY, ambient, daytimePercent, parallaxSky, ceilingHeight, openDoors, voxelGrid, gameWorldPixels);
+		break;
+	}
 	// Update the game world texture with the new ARGB8888 pixels.
 	SDL_UnlockTexture(this->gameWorldTexture);
 
